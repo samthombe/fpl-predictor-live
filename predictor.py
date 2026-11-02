@@ -1,53 +1,58 @@
-# predictor.py -- FIXED SCOPE ERROR + STRATEGIC LAYERS
+# predictor.py -- SAFE CLOUD VERSION
 import pandas as pd
 import numpy as np
-import joblib
 from pathlib import Path
+
+# Try importing joblib, but don't crash if it's missing
+try:
+    import joblib
+    JOBLIB_AVAILABLE = True
+except ImportError:
+    JOBLIB_AVAILABLE = False
+    print("WARNING: joblib not available. Using heuristics only.")
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "models"
 
-# --- LOAD MODELS WITH FALLBACKS ---
 MODELS_LOADED = False
 CALIBRATORS_LOADED = False
+MODEL_MEAN = None
+MODEL_Q10 = None
+MODEL_Q90 = None
+CALIBRATORS = None
 
-try:
-    # Try loading quantile bundle first (new method)
-    if (MODEL_DIR / "lgb_quantiles.pkl").exists():
-        QUANTILE_MODELS = joblib.load(MODEL_DIR / "lgb_quantiles.pkl")
-        MODEL_MEAN = QUANTILE_MODELS.get('mean') or QUANTILE_MODELS.get('q50')
-        MODEL_Q10 = QUANTILE_MODELS.get('q10')
-        MODEL_Q90 = QUANTILE_MODELS.get('q90')
-        MODELS_LOADED = True
-        print("INFO: Loaded bundled quantile models.")
-    
-    # Fallback to individual pkl files (old method)
-    elif (MODEL_DIR / "lgb_mean.pkl").exists():
-        MODEL_MEAN = joblib.load(MODEL_DIR / "lgb_mean.pkl")
-        MODEL_Q10 = joblib.load(MODEL_DIR / "lgb_q10.pkl") if (MODEL_DIR / "lgb_q10.pkl").exists() else None
-        MODEL_Q90 = joblib.load(MODEL_DIR / "lgb_q90.pkl") if (MODEL_DIR / "lgb_q90.pkl").exists() else None
-        MODELS_LOADED = True
-        print("INFO: Loaded individual model files.")
-    else:
-        print("WARNING: No ML models found. Using heuristics only.")
+if JOBLIB_AVAILABLE and MODEL_DIR.exists():
+    try:
+        # Check for bundled quantiles first
+        if (MODEL_DIR / "lgb_quantiles.pkl").exists():
+            QUANTILE_MODELS = joblib.load(MODEL_DIR / "lgb_quantiles.pkl")
+            MODEL_MEAN = QUANTILE_MODELS.get('mean') or QUANTILE_MODELS.get('q50')
+            MODEL_Q10 = QUANTILE_MODELS.get('q10')
+            MODEL_Q90 = QUANTILE_MODELS.get('q90')
+            MODELS_LOADED = True
+            print("INFO: Loaded bundled quantile models.")
         
-except Exception as e:
-    print(f"ERROR loading models: {e}. Falling back to heuristics.")
-    MODELS_LOADED = False
+        # Fallback to individual pkl files
+        elif (MODEL_DIR / "lgb_mean.pkl").exists():
+            MODEL_MEAN = joblib.load(MODEL_DIR / "lgb_mean.pkl")
+            MODEL_Q10 = joblib.load(MODEL_DIR / "lgb_q10.pkl") if (MODEL_DIR / "lgb_q10.pkl").exists() else None
+            MODEL_Q90 = joblib.load(MODEL_DIR / "lgb_q90.pkl") if (MODEL_DIR / "lgb_q90.pkl").exists() else None
+            MODELS_LOADED = True
+            print("INFO: Loaded individual model files.")
+            
+        # Load calibrators if present
+        if (MODEL_DIR / "isotonic_calibrators.pkl").exists():
+            CALIBRATORS = joblib.load(MODEL_DIR / "isotonic_calibrators.pkl")
+            CALIBRATORS_LOADED = True
+            
+    except Exception as e:
+        print(f"ERROR loading models: {e}. Falling back to heuristics.")
+        MODELS_LOADED = False
+else:
+    print("INFO: No models found or joblib unavailable. Using heuristics.")
 
-# --- LOAD CALIBRATORS (OPTIONAL) ---
-try:
-    if (MODEL_DIR / "isotonic_calibrators.pkl").exists():
-        CALIBRATORS = joblib.load(MODEL_DIR / "isotonic_calibrators.pkl")
-        CALIBRATORS_LOADED = True
-        print("INFO: Loaded isotonic calibrators.")
-    else:
-        CALIBRATORS = None
-        print("INFO: No calibrators found. Using raw model outputs.")
-except Exception as e:
-    print(f"WARNING: Failed to load calibrators ({e}). Using raw outputs.")
-    CALIBRATORS = None
-    CALIBRATORS_LOADED = False
+# ... rest of your predictor.py code remains unchanged ...
+# Ensure _heuristic_projection is defined below this block so it works even if MODELS_LOADED is False
 
 
 FEATURE_COLS = [
