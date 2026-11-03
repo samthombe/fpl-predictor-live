@@ -126,15 +126,21 @@ if "predicted_floor" in cap_df.columns and "predicted_ceiling" in cap_df.columns
         upside = cap_df.nlargest(3, "predicted_ceiling")[["web_name", "position", "team", "predicted_ceiling"]]
         st.dataframe(upside.round(2), hide_index=True, use_container_width=True)
         
-    with col_c:
-        st.markdown("**💎 Differentials (High Ceiling, Low Form Proxy)**")
-        # Simple heuristic: High ceiling but form < 6 (undervalued?)
-        diff_candidates = cap_df[(cap_df["form"] < 6.0)].nlargest(3, "predicted_ceiling")
-        if not diff_candidates.empty:
-            diffs = diff_candidates[["web_name", "position", "team", "predicted_ceiling", "form"]]
-            st.dataframe(diffs.round(2), hide_index=True, use_container_width=True)
-        else:
-            st.write("No clear differentials found.")
+    # In app.py, replace the Differential logic with this:
+
+with col_c:
+    st.markdown("**💎 True Differentials (High Ceiling, Low Ownership)**")
+    # Filter for players owned by < 10% but with ceiling > 7.0
+    diff_candidates = cap_df[
+        (cap_df["sel_lag1"] < 10.0) & 
+        (cap_df["predicted_ceiling"] > 7.0)
+    ].nlargest(3, "predicted_ceiling")
+    
+    if not diff_candidates.empty:
+        diffs = diff_candidates[["web_name", "position", "team", "predicted_ceiling", "sel_lag1"]]
+        st.dataframe(diffs.round(2), hide_index=True, use_container_width=True)
+    else:
+        st.write("No strong differentials found (all high-ceiling players are popular).")
 else:
     st.warning("Captaincy matrix requires ML models to be loaded.")
     # In app.py sidebar
