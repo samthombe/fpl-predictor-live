@@ -1,0 +1,56 @@
+name: Weekly Model Retrain & Deploy
+
+on:
+  schedule:
+    # Runs every Sunday at 02:00 UTC (matches your previous local routine)
+    - cron: '0 2 * * 0'
+  workflow_dispatch:  # Allows manual trigger from GitHub UI if needed
+
+permissions:
+  contents: write  # Required to push changes back to the repo
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Clone Vaastav History Repo
+        run: |
+          # Shallow clone to save time/space
+          git clone --depth 1 https://github.com/vaastav/Fantasy-Premier-League.git data/vaastav
+
+      - name: Build Training Dataset
+        run: |
+          python build_training_set.py
+
+      - name: Train LightGBM Models
+        run: |
+          python train_model.py
+
+      - name: Commit Updated Models
+        run: |
+          git config user.name "FPL-AutoBot"
+          git config user.email "bot@example.com"
+          
+          # Only commit if models actually changed
+          if [[ $(git status --porcelain models/) ]]; then
+            git add models/
+            git commit -m "Auto-retrain: $(date +%Y-%m-%d)"
+            git push origin main
+            echo "✅ Models updated and pushed."
+          else
+            echo "ℹ️ No significant model changes detected."
+          fi
