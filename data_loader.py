@@ -1,6 +1,8 @@
+# data_loader.py -- ROBUST CLOUD VERSION (Compatible with Streamlit >=1.40 & Py3.14)
 import requests
 import pandas as pd
 import numpy as np
+from pathlib import Path
 
 BASE_URL = "https://fantasy.premierleague.com/api/bootstrap-static/"
 FIXTURE_URL = "https://fantasy.premierleague.com/api/fixtures/"
@@ -24,20 +26,25 @@ NUMERIC_DEFAULTS = [
     "now_cost", "element_type", "team_code", "id",
 ]
 
-HARD_POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-VALID_POS = {"GK", "DEF", "MID", "FWD"}
+POSITION_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
 
 def _get_json(url, params=None):
-    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    """Fetch JSON with timeout and retry logic."""
+    try:
+        r = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"ERROR fetching {url}: {e}")
+        raise
 
 
 def _ensure_numeric_defaults(p: pd.DataFrame) -> pd.DataFrame:
     for col in NUMERIC_DEFAULTS:
         if col not in p.columns:
             p[col] = 0
+        # Force numeric, fill NaNs with 0
         p[col] = pd.to_numeric(p[col], errors="coerce").fillna(0)
     return p
 
@@ -57,52 +64,16 @@ def _build_names(p: pd.DataFrame) -> pd.DataFrame:
     return p
 
 
-def _build_position_map(element_types) -> dict:
-    m = dict(HARD_POS)
-    if not element_types:
-        return m
-    for et in element_types:
-        try:
-            eid = int(et.get("id"))
-            short = str(et.get("singular_name_short", "")).upper()
-            if short in VALID_POS:
-                m[eid] = short
-        except Exception:
-            continue
-    return m
-
-
-def _select_next_fixtures(fixtures, events_df):
-    """Return (fixtures_for_next_gw, next_gw_id). Falls back safely."""
-    if not fixtures:
-        return fixtures, None
-    try:
-        next_gw = None
-        if events_df is not None and not events_df.empty and "id" in events_df.columns:
-            ev = events_df.copy()
-            ev["id"] = pd.to_numeric(ev["id"], errors="coerce")
-            ev = ev.dropna(subset=["id"])
-            if "finished" in ev.columns:
-                fin = ev["finished"].astype(str).str.lower().isin(["true", "1", "t", "yes"])
-                not_fin = ev[~fin]
-                if not not_fin.empty:
-                    next_gw = int(not_fin["id"].min())
-                else:
-                    fin_ids = ev.loc[fin, "id"]
-                    next_gw = int(fin_ids.max()) + 1 if not fin_ids.empty else int(ev["id"].min())
-            else:
-                next_gw = int(ev["id"].min())
-        if next_gw is not None:
-            filtered = [f for f in fixtures if f.get("event") == next_gw]
-            if filtered:
-                return filtered, next_gw
-        return fixtures, next_gw
-    except Exception:
-        return fixtures, None
+def _parse_ownership(series: pd.Series) -> pd.Series:
+    """Robustly parses selected_by_percent into a float 0-100."""
+    s_str = series.astype(str).str.strip()
+    s_clean = s_str.str.replace('%', '', regex=False)
+    s_num = pd.to_numeric(s_clean, errors="coerce")
+    return s_num.fillna(0.0).clip(lower=0.0, upper=100.0)
 
 
 def load_raw_data():
-    """Returns (players, teams, events, fixtures, debug, element_types)."""
+    """Returns (players, teams, events, fixtures, debug_dict)."""
     bootstrap = _get_json(BASE_URL)
 
     debug = {
@@ -119,7 +90,6 @@ def load_raw_data():
         "error": None,
     }
 
-    # *** THE FIX: the array is called "elements", not "players" ***
     players_raw = bootstrap.get("elements", []) if isinstance(bootstrap, dict) else []
     teams_raw = bootstrap.get("teams", []) if isinstance(bootstrap, dict) else []
     events_raw = bootstrap.get("events", []) if isinstance(bootstrap, dict) else []
@@ -131,7 +101,6 @@ def load_raw_data():
         debug["player_columns_sample"] = sorted(list(first.keys()))
         debug["has_chance_col"] = "chance_of_playing_next_round" in first
         debug["has_now_cost"] = "now_cost" in first
-        # keep a small trimmed sample so we can verify field names if anything is off
         debug["sample_element"] = {
             k: first.get(k)
             for k in ["id", "web_name", "first_name", "second_name", "team_code",
@@ -164,6 +133,38 @@ def load_raw_data():
     return players, teams, events, fixtures, debug, element_types
 
 
+def _select_next_fixtures(fixtures_list, events_df):
+    """Identifies the NEXT upcoming Gameweek and returns only its fixtures."""
+    if not fixtures_list or events_df is None or events_df.empty:
+        return [], None
+
+    target_gw_id = None
+    
+    ev = events_df.copy()
+    ev["id"] = pd.to_numeric(ev["id"], errors="coerce")
+    ev = ev.dropna(subset=["id"]).sort_values("id")
+    
+    if "finished" in ev.columns:
+        ev["is_finished"] = ev["finished"].astype(str).str.lower().isin(["true", "1", "t", "yes"])
+        pending_events = ev[~ev["is_finished"]]
+        if not pending_events.empty:
+            target_gw_id = int(pending_events.iloc[0]["id"])
+        else:
+            target_gw_id = int(ev["id"].max()) + 1
+    else:
+        max_fixture_gw = max((f.get("event", 0) for f in fixtures_list), default=0)
+        target_gw_id = max_fixture_gw 
+
+    if target_gw_id is None:
+        return [], None
+
+    filtered_fixtures = [f for f in fixtures_list if f.get("event") == target_gw_id]
+    
+    print(f"DEBUG: Selected GW {target_gw_id}. Found {len(filtered_fixtures)} fixtures.")
+
+    return filtered_fixtures, target_gw_id
+
+
 def clean_players(players: pd.DataFrame, teams: pd.DataFrame, position_map: dict) -> pd.DataFrame:
     p = players.copy()
     if p.empty:
@@ -172,8 +173,10 @@ def clean_players(players: pd.DataFrame, teams: pd.DataFrame, position_map: dict
     p = _ensure_numeric_defaults(p)
     p = _build_names(p)
 
+    # Position mapping
     p["position"] = pd.to_numeric(p["element_type"], errors="coerce").map(position_map)
 
+    # Team short names
     team_map = {}
     if not teams.empty and "code" in teams.columns:
         t = teams.copy()
@@ -184,36 +187,60 @@ def clean_players(players: pd.DataFrame, teams: pd.DataFrame, position_map: dict
             team_map = dict(zip(t["code"], t[name_col].astype(str)))
     p["team"] = p["team_code"].astype(int).map(team_map).fillna("?")
 
-    # now_cost is in tenths of £m (55 -> £5.5m)
+    # Price in £m
     p["price_m"] = pd.to_numeric(p["now_cost"], errors="coerce").fillna(0) / 10.0
 
+    # Status normalization
     if "status" in p.columns:
         p["status"] = p["status"].astype(str).str.lower()
     else:
         p["status"] = "a"
 
+    # Chance of playing
     if "chance_of_playing_next_round" in p.columns:
         chance = pd.to_numeric(p["chance_of_playing_next_round"], errors="coerce")
         p["chance_pct"] = chance.fillna(100).clip(lower=0, upper=100)
     else:
         p["chance_pct"] = 100.0
 
+    # CRITICAL: Parse Ownership Correctly
+    if "selected_by_percent" in p.columns:
+        p["selected_by_percent"] = _parse_ownership(p["selected_by_percent"])
+    else:
+        p["selected_by_percent"] = 0.0
+
+    # Filter available players
     strict = p[
         p["status"].isin(["a", "d"]) &
         (p["chance_pct"] >= 25) &
         (p["price_m"] > 0)
     ].copy()
 
+    # Fallback if strict filter wipes everyone
     if len(strict) == 0 and len(p) > 0:
         strict = p[p["price_m"] > 0].copy()
         strict["_relaxed"] = True
 
-    strict = strict[strict["position"].isin(list(VALID_POS))]
+    # Drop invalid positions
+    strict = strict[strict["position"].isin(["GK", "DEF", "MID", "FWD"])]
+    
     return strict.reset_index(drop=True)
 
 
 def load_clean_data():
     players, teams, events, fixtures, debug, element_types = load_raw_data()
-    position_map = _build_position_map(element_types)
-    cleaned = clean_players(players, teams, position_map)
+    
+    # Build dynamic position map from API
+    pos_map = dict(POSITION_MAP)
+    if element_types:
+        for et in element_types:
+            try:
+                eid = int(et.get("id"))
+                short = str(et.get("singular_name_short", "")).upper()
+                if short in ["GK", "DEF", "MID", "FWD"]:
+                    pos_map[eid] = short
+            except Exception:
+                continue
+                
+    cleaned = clean_players(players, teams, pos_map)
     return cleaned, teams, events, fixtures, debug
