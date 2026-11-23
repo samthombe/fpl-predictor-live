@@ -1,193 +1,184 @@
+# optimizer.py -- ROBUST SQUAD BUILDER (never fails silently)
 import pandas as pd
 import numpy as np
 
-# FPL squad composition is FIXED at 15 players:
-# 2 GK, 5 DEF, 5 MID, 3 FWD. (The 3-5 ranges only apply to the starting XI.)
-SQUAD_COUNTS = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
-POS_ORDER = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
+REQUIRED = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
+SQUAD_SIZE = 15
 
 
-def _prepare(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df = df.dropna(subset=["id", "position", "price_m", "projected_points", "team_code"])
-    df = df[df["position"].isin(SQUAD_COUNTS.keys())]
-    df = df[(df["projected_points"] > 0) & (df["price_m"] > 0)]
-    df = df.drop_duplicates(subset=["id"])
-    df = df.reset_index(drop=True)
-    if len(df) < 15:
-        raise ValueError("Not enough available players to build a 15-man squad.")
-    return df
+class SquadError(Exception):
+    """Raised only when the input data itself is unusable."""
+    pass
 
 
-def _arrays(df: pd.DataFrame):
-    pos = df["position"].to_numpy()
-    team = df["team_code"].astype(int).to_numpy()
-    price = df["price_m"].astype(float).to_numpy()
-    pts = df["projected_points"].astype(float).to_numpy()
-    value = np.where(price > 0, pts / price, 0.0)
-    groups = {p: np.where(pos == p)[0].tolist() for p in SQUAD_COUNTS}
-    return pos, team, price, pts, value, groups
+def _prep(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+
+    # Hard requirements
+    for col in ["web_name", "position", "team", "price_m", "projected_points"]:
+        if col not in d.columns:
+            raise SquadError(f"Missing required column: '{col}'")
+
+    d["price_m"] = pd.to_numeric(d["price_m"], errors="coerce")
+    d["projected_points"] = pd.to_numeric(d["projected_points"], errors="coerce")
+
+    d = d.dropna(subset=["price_m", "projected_points"])
+    d = d[(d["price_m"] > 0) & (d["position"].isin(REQUIRED.keys()))]
+
+    # Normalise team labels so the 3-per-club rule works even if names differ
+    d["team"] = d["team"].astype(str).fillna("?")
+
+    # De-duplicate players (same name+team+price can appear twice after merges)
+    d = d.drop_duplicates(subset=["web_name", "team", "position"], keep="first")
+
+    return d.reset_index(drop=True)
 
 
-def _team_cap_ok(team_used, tc, ts, max_per_team):
-    # after removing s (team ts) and adding c (team tc), team[tc] must stay <= max
-    used_before_add = team_used[tc] - (1 if tc == ts else 0)
-    return used_before_add < max_per_team
+def _counts(squad):
+    pos = {k: 0 for k in REQUIRED}
+    teams = {}
+    for p in squad:
+        pos[p["position"]] += 1
+        teams[p["team"]] = teams.get(p["team"], 0) + 1
+    return pos, teams
 
 
-def _construct(order, groups, team, price, pts, value, max_per_team, budget):
-    """Greedy build by 'pts' or 'value', then repair budget."""
-    key_arr = pts if order == "pts" else value
-    team_used = {}
-    chosen = {p: [] for p in SQUAD_COUNTS}
-    cost = 0.0
-
-    for p in ["GK", "DEF", "MID", "FWD"]:
-        need = SQUAD_COUNTS[p]
-        cands = sorted(groups[p], key=lambda i: key_arr[i], reverse=True)
-        for i in cands:
-            t = int(team[i])
-            if team_used.get(t, 0) < max_per_team:
-                chosen[p].append(i)
-                team_used[t] = team_used.get(t, 0) + 1
-                cost += price[i]
-                if len(chosen[p]) == need:
-                    break
-        if len(chosen[p]) < need:
-            return None  # not enough feasible players in this position
-
-    # Repair budget: swap expensive -> cheaper same-position, min points loss
-    guard = 0
-    while cost > budget and guard < 500:
-        guard += 1
-        best = None  # (loss, pos, idx_in_list, replacement, new_cost)
-        for p in chosen:
-            cur = chosen[p]
-            cur_set = set(cur)
-            for si, s in enumerate(cur):
-                ts = int(team[s])
-                for c in groups[p]:
-                    if c in cur_set or c == s:
-                        continue
-                    if price[c] >= price[s]:
-                        continue
-                    new_cost = cost - price[s] + price[c]
-                    if new_cost > budget:
-                        continue
-                    tc = int(team[c])
-                    if not _team_cap_ok(team_used, tc, ts, max_per_team):
-                        continue
-                    loss = pts[s] - pts[c]
-                    if best is None or loss < best[0]:
-                        best = (loss, p, si, c, new_cost, ts, tc)
-        if best is None:
-            break
-        _, p, si, c, new_cost, ts, tc = best
-        chosen[p][si] = c
-        team_used[ts] -= 1
-        team_used[tc] = team_used.get(tc, 0) + 1
-        cost = new_cost
-
-    if cost > budget:
-        return None
-    flat = chosen["GK"] + chosen["DEF"] + chosen["MID"] + chosen["FWD"]
-    return flat, team_used, cost
+def _can_add(player, squad, budget_left, max_per_team):
+    pos, teams = _counts(squad)
+    if len(squad) >= SQUAD_SIZE:
+        return False
+    if pos[player["position"]] >= REQUIRED[player["position"]]:
+        return False
+    if teams.get(player["team"], 0) >= max_per_team:
+        return False
+    if player["price_m"] > budget_left + 1e-9:
+        return False
+    return True
 
 
-def _local_search(flat, team, price, pts, groups, max_per_team, budget):
-    chosen = {p: [] for p in SQUAD_COUNTS}
-    for i in flat:
-        chosen[str(team.dtype and "") or ""]  # noop placeholder
-    # rebuild grouped
-    chosen = {p: [] for p in SQUAD_COUNTS}
-    pos_of = {}
-    # we need position per index; recompute from groups membership
-    idx_to_pos = {}
-    for p, lst in groups.items():
-        for i in lst:
-            idx_to_pos[i] = p
-    for i in flat:
-        chosen[idx_to_pos[i]].append(i)
-
-    team_used = {}
-    for p in chosen:
-        for i in chosen[p]:
-            t = int(team[i])
-            team_used[t] = team_used.get(t, 0) + 1
-    cost = sum(price[i] for i in flat)
-
-    improved = True
-    rounds = 0
-    while improved and rounds < 200:
-        improved = False
-        rounds += 1
-        best_gain = 0.0
-        best_move = None
-        for p in chosen:
-            cur = chosen[p]
-            cur_set = set(cur)
-            for si, s in enumerate(cur):
-                ts = int(team[s])
-                for c in groups[p]:
-                    if c in cur_set or c == s:
-                        continue
-                    gain = pts[c] - pts[s]
-                    if gain <= best_gain:
-                        continue
-                    tc = int(team[c])
-                    if not _team_cap_ok(team_used, tc, ts, max_per_team):
-                        continue
-                    new_cost = cost - price[s] + price[c]
-                    if new_cost > budget:
-                        continue
-                    best_gain = gain
-                    best_move = (p, si, c, ts, tc, new_cost)
-        if best_move is not None:
-            p, si, c, ts, tc, new_cost = best_move
-            chosen[p][si] = c
-            team_used[ts] -= 1
-            team_used[tc] = team_used.get(tc, 0) + 1
-            cost = new_cost
-            improved = True
-
-    flat = chosen["GK"] + chosen["DEF"] + chosen["MID"] + chosen["FWD"]
-    return flat, sum(pts[i] for i in flat)
+def _cheapest_filler(d, position, squad, budget_left, max_per_team):
+    """Find cheapest legal player of a given position (used to guarantee feasibility)."""
+    pos, teams = _counts(squad)
+    used = {p["web_name"] + "|" + p["team"] for p in squad}
+    pool = d[d["position"] == position].sort_values("price_m")
+    for _, r in pool.iterrows():
+        key = r["web_name"] + "|" + r["team"]
+        if key in used:
+            continue
+        if teams.get(r["team"], 0) >= max_per_team:
+            continue
+        if r["price_m"] <= budget_left + 1e-9:
+            return r.to_dict()
+    return None
 
 
 def optimize_squad(df: pd.DataFrame, budget: float = 100.0, max_per_team: int = 3) -> pd.DataFrame:
-    """
-    Dependency-free FPL squad optimizer.
-    Builds a valid 15-man squad (2 GK / 5 DEF / 5 MID / 3 FWD),
-    respects budget and max-per-team, and hill-climbs to maximise projected points.
-    """
-    df = _prepare(df)
-    pos, team, price, pts, value, groups = _arrays(df)
+    d = _prep(df)
 
-    best_flat = None
-    best_total = -1.0
+    if d.empty:
+        raise SquadError("No usable players after cleaning (check price_m / position columns).")
 
-    for order in ("pts", "value"):
-        built = _construct(order, groups, team, price, pts, value, max_per_team, budget)
-        if built is None:
+    # Feasibility check: do we even have enough players per position?
+    for pos, need in REQUIRED.items():
+        have = int((d["position"] == pos).sum())
+        if have < need:
+            raise SquadError(
+                f"Not enough {pos} players available: need {need}, found {have}. "
+                f"Loosen the availability filter in data_loader.py."
+            )
+
+    # ---- PHASE 1: reserve budget with cheapest legal skeleton ----
+    squad = []
+    budget_left = float(budget)
+
+    for pos, need in REQUIRED.items():
+        for _ in range(need):
+            pick = _cheapest_filler(d, pos, squad, budget_left, max_per_team)
+            if pick is None:
+                raise SquadError(
+                    f"Cannot build a legal squad within £{budget:.1f}m "
+                    f"(max {max_per_team}/club). Try raising the budget or allowing 3 per team."
+                )
+            squad.append(pick)
+            budget_left -= pick["price_m"]
+
+    # ---- PHASE 2: upgrade each slot to best affordable points ----
+    # Sort candidates by projected points descending once
+    ranked = d.sort_values("projected_points", ascending=False).to_dict("records")
+
+    improved = True
+    passes = 0
+    while improved and passes < 6:
+        improved = False
+        passes += 1
+        for i in range(len(squad)):
+            current = squad[i]
+            rest = squad[:i] + squad[i + 1:]
+            freed = budget_left + current["price_m"]
+
+            pos_rest, teams_rest = _counts(rest)
+            used = {p["web_name"] + "|" + p["team"] for p in rest}
+
+            best = None
+            for cand in ranked:
+                if cand["position"] != current["position"]:
+                    continue
+                key = cand["web_name"] + "|" + cand["team"]
+                if key in used:
+                    continue
+                if teams_rest.get(cand["team"], 0) >= max_per_team:
+                    continue
+                if cand["price_m"] > freed + 1e-9:
+                    continue
+                if cand["projected_points"] <= current["projected_points"] + 1e-9:
+                    break  # ranked desc -> nothing better below
+                best = cand
+                break
+
+            if best is not None:
+                squad[i] = best
+                budget_left = freed - best["price_m"]
+                improved = True
+
+    out = pd.DataFrame(squad)
+
+    # Order nicely: GK, DEF, MID, FWD then by points
+    order = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
+    out["_o"] = out["position"].map(order)
+    out = out.sort_values(["_o", "projected_points"], ascending=[True, False]).drop(columns="_o")
+
+    # Sanity assertions with REAL messages
+    if len(out) != SQUAD_SIZE:
+        raise SquadError(f"Internal error: built {len(out)} players instead of 15.")
+    if out["price_m"].sum() > budget + 1e-6:
+        raise SquadError(f"Internal error: squad cost £{out['price_m'].sum():.1f}m exceeds £{budget:.1f}m.")
+
+    return out.reset_index(drop=True)
+
+
+def pick_starting_xi(squad: pd.DataFrame) -> pd.DataFrame:
+    """Best legal XI: 1 GK, >=3 DEF, >=2 MID, >=1 FWD, total 11."""
+    s = squad.copy()
+    xi = []
+    # mandatory minimums
+    mins = {"GK": 1, "DEF": 3, "MID": 2, "FWD": 1}
+    for pos, n in mins.items():
+        pool = s[s["position"] == pos].sort_values("projected_points", ascending=False)
+        xi.extend(pool.head(n).to_dict("records"))
+
+    chosen = {p["web_name"] + "|" + p["team"] for p in xi}
+    rest = [r for r in s.to_dict("records") if (r["web_name"] + "|" + r["team"]) not in chosen]
+    rest.sort(key=lambda r: r["projected_points"], reverse=True)
+
+    for r in rest:
+        if len(xi) >= 11:
+            break
+        # cannot add a second GK
+        if r["position"] == "GK":
             continue
-        flat, _, _ = built
-        flat, total = _local_search(flat, team, price, pts, groups, max_per_team, budget)
-        if total > best_total:
-            best_total = total
-            best_flat = flat
+        xi.append(r)
 
-    if best_flat is None or len(best_flat) != 15:
-        raise RuntimeError(
-            "Optimizer could not build a valid 15-player squad. "
-            "Increase the budget, set max players per team to 3, "
-            "or ensure enough players are available per position."
-        )
-
-    squad = df.iloc[best_flat].copy()
-    squad["_pos_order"] = squad["position"].map(POS_ORDER)
-    squad = (
-        squad.sort_values(["_pos_order", "projected_points"], ascending=[True, False])
-        .drop(columns=["_pos_order"])
-        .reset_index(drop=True)
-    )
-    return squad
+    out = pd.DataFrame(xi)
+    order = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
+    out["_o"] = out["position"].map(order)
+    return out.sort_values(["_o", "projected_points"], ascending=[True, False]).drop(columns="_o").reset_index(drop=True)

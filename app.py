@@ -80,48 +80,63 @@ budget = st.slider("Budget (£m)", 80.0, 100.0, 100.0, 0.5)
 max_team = st.selectbox("Max players per team", [2, 3], index=1)
 
 if st.button("Optimize 15-player team"):
+    import traceback
+    from optimizer import optimize_squad, pick_starting_xi
+
     try:
-        # PRE-SORT DF BY PROJECTED POINTS DESCENDING FOR BETTER OPTIMIZER STARTING POINT
         df_sorted = df.sort_values("projected_points", ascending=False).reset_index(drop=True)
-        
-        with st.spinner("Solving optimization problem..."):
+
+        with st.spinner("Building legal 15-man squad..."):
             squad = optimize_squad(df_sorted, budget=budget, max_per_team=max_team)
-        
+
         total_pts = squad["projected_points"].sum()
         total_cost = squad["price_m"].sum()
-        
-        has_floor = "predicted_floor" in squad.columns
-        has_ceiling = "predicted_ceiling" in squad.columns
-        
+
         c1, c2, c3 = st.columns(3)
-        c1.metric("Projected points", f"{total_pts:.2f}")
+        c1.metric("Squad projected pts", f"{total_pts:.2f}")
         c2.metric("Squad cost", f"£{total_cost:.1f}m")
         c3.metric("Bank", f"£{budget - total_cost:.1f}m")
-        
-        if has_floor and has_ceiling:
+
+        if "predicted_floor" in squad.columns and "predicted_ceiling" in squad.columns:
             c4, c5 = st.columns(2)
             c4.metric("Floor (Safe)", f"{squad['predicted_floor'].sum():.2f}")
             c5.metric("Ceiling (Upside)", f"{squad['predicted_ceiling'].sum():.2f}")
 
-        display_cols = ["web_name", "position", "team", "price_m", "projected_points"]
-        if has_floor:
-            display_cols.append("predicted_floor")
-        if has_ceiling:
-            display_cols.append("predicted_ceiling")
-        display_cols.extend(["value", "chance_pct", "selected_by_percent"])
-        
-        final_display_cols = [c for c in display_cols if c in squad.columns]
-        
-        st.dataframe(squad[final_display_cols].round(2), use_container_width=True)
-        
+        # ---- Starting XI (what actually scores) ----
+        xi = pick_starting_xi(squad)
+        bench = squad[~squad.index.isin(xi.index)] if len(squad) == 15 else squad.iloc[11:]
+
+        st.markdown("### ⚽ Starting XI")
+        st.caption(f"XI projected points: **{xi['projected_points'].sum():.2f}**")
+        cols = [c for c in ["web_name","position","team","price_m","projected_points",
+                            "predicted_floor","predicted_ceiling","selected_by_percent"] if c in xi.columns]
+        st.dataframe(xi[cols].round(2), hide_index=True, use_container_width=True)
+
+        st.markdown("### 🪑 Full 15-man squad")
+        st.dataframe(squad[cols].round(2), hide_index=True, use_container_width=True)
+
         st.download_button(
             "Download squad CSV",
             data=squad.to_csv(index=False).encode(),
-            file_name="fpl_optimal_squad.csv",
+            file_name=f"fpl_squad_gw{debug.get('next_gw','x')}.csv",
             mime="text/csv",
         )
+
     except Exception as e:
-        st.error(str(e))
+        msg = str(e).strip()
+        if not msg:
+            msg = f"{type(e).__name__} raised with no message (see details below)."
+        st.error(f"Optimizer failed: {msg}")
+        with st.expander("🔬 Full traceback (for debugging)"):
+            st.code(traceback.format_exc())
+        st.info(
+            f"Diagnostics: rows={len(df)}, "
+            f"GK={int((df['position']=='GK').sum())}, "
+            f"DEF={int((df['position']=='DEF').sum())}, "
+            f"MID={int((df['position']=='MID').sum())}, "
+            f"FWD={int((df['position']=='FWD').sum())}, "
+            f"cheapest_total_possible=£{df.groupby('position')['price_m'].min().sum():.1f}m"
+        )
 
 # ---------- CAPTAINCY MATRIX (UPGRADED WITH OWNERSHIP) ----------
 st.subheader("🎯 Captaincy Recommendations")
