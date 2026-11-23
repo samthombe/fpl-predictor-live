@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 
 from data_loader import load_clean_data
-from predictor import project_players
+from predictor import project_players, LAST_DEBUG
 from optimizer import optimize_squad
 
 
@@ -49,7 +49,10 @@ with st.expander("🔎 Debug: what the FPL API returned"):
         st.json(debug.get("sample_element"))
 
 # ---------- PROCESS DATA ----------
-df = project_players(players, teams, fixtures)
+df = project_players(players, teams, fixtures
+
+with st.expander("🧪 Engine & fixture debug"):
+    st.json(LAST_DEBUG)
 
 if "_relaxed" in df.columns and len(df) > 0 and bool(df["_relaxed"].any()):
     st.warning("Strict availability filter removed everyone; showing all priced players instead.")
