@@ -1,4 +1,4 @@
-# predictor.py -- ALIGNED FEATURES + FIXTURE MAPPING + VISIBLE DEBUG
+# predictor.py -- AUTO MODEL-ARITY + FIXTURE MAPPING + VISIBLE DEBUG
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -34,9 +34,16 @@ if JOBLIB_OK:
 
 LAST_DEBUG["models_loaded"] = MODELS_LOADED
 
-# MUST match train_model.py FEATURE_COLS exactly (19 features).
-FEATURE_COLS = [
+FEATURE_COLS_19 = [
     "position", "gw", "is_home", "fdr",
+    "form_1", "form_3", "form_5", "ppg_lag",
+    "xg_lag1", "xa_lag1", "def_actions_sum_lag1",
+    "minutes_lag1", "starts_lag1", "goals_lag1", "assists_lag1",
+    "bonus_lag1", "clean_sheets_lag1",
+    "price_lag1", "sel_lag1",
+]
+FEATURE_COLS_21 = [
+    "position", "team_code", "gw", "is_home", "fdr", "opp_code",
     "form_1", "form_3", "form_5", "ppg_lag",
     "xg_lag1", "xa_lag1", "def_actions_sum_lag1",
     "minutes_lag1", "starts_lag1", "goals_lag1", "assists_lag1",
@@ -46,13 +53,26 @@ FEATURE_COLS = [
 POS_MAP = {"GK": 1, "DEF": 2, "MID": 3, "FWD": 4}
 
 
+def _model_n(m):
+    if hasattr(m, "num_feature"):
+        try:
+            return int(m.num_feature())
+        except Exception:
+            pass
+    for attr in ("n_features_in_", "n_features_"):
+        if hasattr(m, attr):
+            try:
+                return int(getattr(m, attr))
+            except Exception:
+                pass
+    return None
+
+
 def _fixture_context(teams, fixtures):
-    """Map fixture team IDs -> codes, then build per-team fixture summary."""
     id_to_code = {}
     if teams is not None and not teams.empty and {"id", "code"} <= set(teams.columns):
         t = teams[["id", "code"]].apply(pd.to_numeric, errors="coerce").dropna()
         id_to_code = {int(r.id): int(r.code) for r in t.itertuples(index=False)}
-
     per_team = {}
     for f in fixtures or []:
         try:
@@ -66,7 +86,6 @@ def _fixture_context(teams, fixtures):
         ad = int(f.get("team_a_difficulty") or 3)
         per_team.setdefault(h, []).append((hd, 1, a))
         per_team.setdefault(a, []).append((ad, 0, h))
-
     summary = {}
     for code, games in per_team.items():
         fdr = float(np.mean([g[0] for g in games]))
@@ -102,17 +121,14 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
         return p
 
     p["team_code"] = pd.to_numeric(p["team_code"], errors="coerce").fillna(0).astype(int)
-
     fx = _fixture_context(teams, fixtures)
     p["fixture_factor"] = p["team_code"].map(lambda c: fx.get(c, {}).get("factor", 1.0))
     p["fdr"] = p["team_code"].map(lambda c: fx.get(c, {}).get("fdr", 3.0))
     p["is_home"] = p["team_code"].map(lambda c: fx.get(c, {}).get("is_home", 0))
     p["opp_code"] = p["team_code"].map(lambda c: fx.get(c, {}).get("opp", 0)).astype(int)
     p["n_fixtures"] = p["team_code"].map(lambda c: fx.get(c, {}).get("n", 0)).astype(int)
-
     p["chance_factor"] = 0.40 + 0.60 * (
-        pd.to_numeric(p["chance_pct"], errors="coerce").fillna(100) / 100.0
-    )
+        pd.to_numeric(p["chance_pct"], errors="coerce").fillna(100) / 100.0)
 
     gw = 0
     if fixtures:
@@ -126,27 +142,26 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
         "teams_with_fixture": len(fx),
         "players_matched": int((p["fixture_factor"] != 1.0).sum()),
         "gw_used": gw,
-        "features_used": len(FEATURE_COLS),
         "sample_fixture_keys": sorted(list((fixtures or [{}])[0].keys()))[:12],
     })
 
     used_ml = False
     if MODELS_LOADED:
         try:
-            # Exact training columns, correct dtypes.
-            # Counting stats are season-to-date totals -- matches the ALIGNED builder.
             X = pd.DataFrame(index=p.index)
             X["position"] = p["position"].map(POS_MAP).fillna(0).astype(int)
+            X["team_code"] = p["team_code"]
             X["gw"] = gw
             X["is_home"] = p["is_home"].astype(int)
             X["fdr"] = p["fdr"].astype(float)
+            X["opp_code"] = p["opp_code"]
             X["form_1"] = pd.to_numeric(p["event_points"], errors="coerce")
             X["form_3"] = pd.to_numeric(p["form"], errors="coerce")
             X["form_5"] = pd.to_numeric(p["points_per_game"], errors="coerce")
             X["ppg_lag"] = X["form_5"]
             X["xg_lag1"] = pd.to_numeric(p["expected_goals"], errors="coerce")
             X["xa_lag1"] = pd.to_numeric(p["expected_assists"], errors="coerce")
-            X["def_actions_sum_lag1"] = np.nan  # not available live; LGB handles NaN
+            X["def_actions_sum_lag1"] = np.nan
             X["minutes_lag1"] = pd.to_numeric(p["minutes"], errors="coerce")
             X["starts_lag1"] = pd.to_numeric(p["starts"], errors="coerce")
             X["goals_lag1"] = pd.to_numeric(p["goals_scored"], errors="coerce")
@@ -155,7 +170,12 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
             X["clean_sheets_lag1"] = pd.to_numeric(p["clean_sheets"], errors="coerce")
             X["price_lag1"] = pd.to_numeric(p["price_m"], errors="coerce")
             X["sel_lag1"] = pd.to_numeric(p["selected_by_percent"], errors="coerce")
-            X = X[FEATURE_COLS]
+
+            n = _model_n(MODEL_MEAN)
+            cols = FEATURE_COLS_21 if n == 21 else FEATURE_COLS_19
+            X = X[cols]
+            LAST_DEBUG["model_features"] = n
+            LAST_DEBUG["features_used"] = len(cols)
 
             proj = np.asarray(MODEL_MEAN.predict(X), dtype=float)
             floor = (np.asarray(MODEL_Q10.predict(X), dtype=float)
@@ -165,12 +185,8 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
 
             cf = p["chance_factor"].to_numpy()
             proj, floor, ceil = proj * cf, floor * cf, ceil * cf
-
-            # Widen intervals (measured coverage 69% vs 80% target).
             floor = np.maximum(proj - (proj - floor) * 1.10, 0.0)
             ceil = proj + (ceil - proj) * 1.10
-
-            # Enforce ordering: floor <= mean <= ceiling (fixes quantile crossing).
             floor = np.minimum(floor, proj)
             ceil = np.maximum(ceil, proj)
 
@@ -190,14 +206,11 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
         p["predicted_floor"] = base * 0.7
         p["predicted_ceiling"] = base * 1.3
 
-    # DGW boost (shared): ~1.75x for two games, allowing for rotation risk.
     n = p["n_fixtures"].to_numpy()
     boost = 1.0 + 0.75 * np.maximum(n - 1, 0)
     p["projected_points"] = p["projected_points"] * boost
     p["predicted_floor"] = p["predicted_floor"] * boost
     p["predicted_ceiling"] = np.minimum(p["predicted_ceiling"] * boost, 20.0 * np.maximum(n, 1))
-
-    # Final safety: keep floor <= projected <= ceiling after all adjustments.
     p["predicted_floor"] = np.minimum(p["predicted_floor"], p["projected_points"])
     p["predicted_ceiling"] = np.maximum(p["predicted_ceiling"], p["projected_points"])
 

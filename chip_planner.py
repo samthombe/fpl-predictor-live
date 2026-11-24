@@ -1,4 +1,4 @@
-# chip_planner.py -- MULTI-GW FIXTURE OUTLOOK + CHIP TIMING
+# chip_planner.py -- MULTI-GW OUTLOOK + CHIP TIMING (type-hardened)
 import requests
 import numpy as np
 import pandas as pd
@@ -32,14 +32,24 @@ def _maps(teams):
     return id_to_code, code_to_short
 
 
+def _int_cols(df):
+    d = df.copy()
+    d.columns = [int(c) for c in d.columns]
+    return d
+
+
 def build_matrix(fixtures, teams, start_gw, horizon=6):
-    gws = list(range(int(start_gw), int(start_gw) + int(horizon)))
+    start_gw, horizon = int(start_gw), int(horizon)
+    gws = list(range(start_gw, start_gw + horizon))
     id2code, code2short = _maps(teams)
     team_names = sorted(code2short.values())
     cells = {t: {g: [] for g in gws} for t in team_names}
-
     for f in fixtures or []:
         ev = f.get("event")
+        try:
+            ev = int(ev)
+        except (TypeError, ValueError):
+            continue
         if ev not in gws:
             continue
         try:
@@ -54,48 +64,42 @@ def build_matrix(fixtures, teams, start_gw, horizon=6):
             cells[hs][ev].append((as_ or "?", hd, "H"))
         if as_:
             cells[as_][ev].append((hs or "?", ad, "A"))
-
     disp, fdr, cnt = {}, {}, {}
     for t in team_names:
         disp[t], fdr[t], cnt[t] = {}, {}, {}
         for g in gws:
-            entries = cells[t][g]
-            cnt[t][g] = len(entries)
-            if not entries:
-                disp[t][g] = "—"
-                fdr[t][g] = np.nan
-            elif len(entries) == 1:
-                opp, d, ha = entries[0]
-                disp[t][g] = f"{opp}({ha})"
-                fdr[t][g] = d
+            e = cells[t][g]
+            cnt[t][g] = len(e)
+            if not e:
+                disp[t][g], fdr[t][g] = "—", np.nan
+            elif len(e) == 1:
+                opp, d, ha = e[0]
+                disp[t][g], fdr[t][g] = f"{opp}({ha})", d
             else:
-                disp[t][g] = f"{len(entries)}× " + "/".join(f"{o}({ha})" for o, _, ha in entries)
-                fdr[t][g] = float(np.mean([d for _, d, _ in entries]))
-
-    index = pd.Index(team_names, name="team")
-    return (pd.DataFrame(disp, index=index).T.rename_axis("team"),
-            pd.DataFrame(fdr, index=index).T.rename_axis("team"),
-            pd.DataFrame(cnt, index=index).T.rename_axis("team"))
+                disp[t][g] = f"{len(e)}× " + "/".join(f"{o}({ha})" for o, _, ha in e)
+                fdr[t][g] = float(np.mean([d for _, d, _ in e]))
+    idx = pd.Index(team_names, name="team")
+    return (pd.DataFrame(disp, index=idx).T.rename_axis("team"),
+            pd.DataFrame(fdr, index=idx).T.rename_axis("team"),
+            pd.DataFrame(cnt, index=idx).T.rename_axis("team"))
 
 
 def windows(count_df):
+    count_df = _int_cols(count_df)
     rows = []
     for g in count_df.columns:
         blanks = [t for t in count_df.index if count_df.loc[t, g] == 0]
         doubles = [t for t in count_df.index if count_df.loc[t, g] >= 2]
-        rows.append({
-            "GW": g,
-            "Playing": int((count_df[g] > 0).sum()),
-            "Blanks": len(blanks),
-            "Blank teams": ", ".join(blanks) or "—",
-            "Doubles": len(doubles),
-            "Double teams": ", ".join(doubles) or "—",
-        })
+        rows.append({"GW": int(g), "Playing": int((count_df[g] > 0).sum()),
+                     "Blanks": len(blanks), "Blank teams": ", ".join(blanks) or "—",
+                     "Doubles": len(doubles), "Double teams": ", ".join(doubles) or "—"})
     return pd.DataFrame(rows)
 
 
 def swing(fdr_df, start_gw, horizon):
-    gws = list(fdr_df.columns)
+    fdr_df = _int_cols(fdr_df)
+    start_gw = int(start_gw)
+    gws = [int(g) for g in fdr_df.columns]
     first = [g for g in gws if g < start_gw + 3]
     later = [g for g in gws if g >= start_gw + 3]
     a = fdr_df[first].mean(axis=1) if first else pd.Series(np.nan, index=fdr_df.index)
@@ -106,26 +110,23 @@ def swing(fdr_df, start_gw, horizon):
 
 
 def recommendations(fdr_df, count_df, projections, start_gw, horizon):
-    gws = list(fdr_df.columns)
+    fdr_df, count_df = _int_cols(fdr_df), _int_cols(count_df)
+    start_gw = int(start_gw)
+    gws = [int(g) for g in fdr_df.columns]
     blanks = {g: [t for t in count_df.index if count_df.loc[t, g] == 0] for g in gws}
     doubles = {g: [t for t in count_df.index if count_df.loc[t, g] >= 2] for g in gws}
     playing = {g: int((count_df[g] > 0).sum()) for g in gws}
     rec = {}
-
     if gws:
         bb = max(gws, key=lambda g: 3 * len(doubles[g]) + playing[g])
-        rec["Bench Boost"] = {
-            "gw": bb, "headline": f"GW{bb}",
-            "rationale": f"{len(doubles[bb])} teams double; {playing[bb]}/20 clubs play.",
-            "targets": doubles[bb][:6],
-        }
+        rec["Bench Boost"] = {"gw": bb, "headline": f"GW{bb}",
+                              "rationale": f"{len(doubles[bb])} teams double; {playing[bb]}/20 clubs play.",
+                              "targets": doubles[bb][:6]}
         fh = max(gws, key=lambda g: (len(blanks[g]), len(doubles[g])))
         kind = "Blank" if blanks[fh] else "Double"
-        rec["Free Hit"] = {
-            "gw": fh, "headline": f"GW{fh}",
-            "rationale": f"{kind} gameweek: {len(blanks[fh])} blank, {len(doubles[fh])} double.",
-            "targets": (blanks[fh] or doubles[fh])[:6],
-        }
+        rec["Free Hit"] = {"gw": fh, "headline": f"GW{fh}",
+                           "rationale": f"{kind} gameweek: {len(blanks[fh])} blank, {len(doubles[fh])} double.",
+                           "targets": (blanks[fh] or doubles[fh])[:6]}
     else:
         rec["Bench Boost"] = {"gw": None, "headline": "—", "rationale": "No window", "targets": []}
         rec["Free Hit"] = {"gw": None, "headline": "—", "rationale": "No window", "targets": []}
@@ -147,20 +148,16 @@ def recommendations(fdr_df, count_df, projections, start_gw, horizon):
                     tc_best = (score, r["web_name"], team, g, c)
     if tc_best:
         _, name, team, g, c = tc_best
-        rec["Triple Captain"] = {
-            "gw": g, "headline": f"{name} · GW{g}",
-            "rationale": "Doubles this GW." if c >= 2 else "Easiest fixture in the window.",
-            "targets": [team],
-        }
+        rec["Triple Captain"] = {"gw": g, "headline": f"{name} · GW{g}",
+                                 "rationale": "Doubles this GW." if c >= 2 else "Easiest fixture in the window.",
+                                 "targets": [team]}
     else:
         rec["Triple Captain"] = {"gw": None, "headline": "—", "rationale": "No candidate", "targets": []}
 
     sw = swing(fdr_df, start_gw, horizon)
     improving = sw[sw["delta"] < 0].sort_values("delta")
-    wc_g = int(start_gw) + 3 if len(improving) >= 6 else int(start_gw) + 1
-    rec["Wildcard"] = {
-        "gw": wc_g, "headline": f"Before GW{wc_g}",
-        "rationale": f"{len(improving)} clubs' fixtures ease over the window.",
-        "targets": improving["team"].head(6).tolist(),
-    }
+    wc_g = start_gw + 3 if len(improving) >= 6 else start_gw + 1
+    rec["Wildcard"] = {"gw": wc_g, "headline": f"Before GW{wc_g}",
+                       "rationale": f"{len(improving)} clubs' fixtures ease over the window.",
+                       "targets": improving["team"].head(6).tolist()}
     return rec, blanks, doubles, playing
