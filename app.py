@@ -283,9 +283,16 @@ with tabs[4]:
 
         st.markdown("#### 🗓 Fixture difficulty matrix (next %d GWs)" % horizon)
         st.dataframe(disp, use_container_width=True)
-        styled = (fdr.style
-                  .background_gradient(cmap="RdYlGn_r", axis=None, vmin=1, vmax=5)
-                  .format(lambda v: "—" if pd.isna(v) else f"{v:.1f}"))
+        def _fdr_css(v):
+            if pd.isna(v):
+                return "background-color:#121A2B;color:#5A6B85;"
+            stops = {1: (0, 229, 160), 2: (124, 255, 79), 3: (255, 176, 32),
+                     4: (255, 122, 69), 5: (255, 77, 109)}
+            k = int(max(1, min(5, round(float(v)))))
+            r, g, b = stops[k]
+            return f"background-color:rgba({r},{g},{b},0.22);color:#E8EEF7;font-weight:700;"
+
+        styled = fdr.style.map(_fdr_css).format(lambda v: "—" if pd.isna(v) else f"{v:.1f}")
         st.dataframe(styled, use_container_width=True)
 
         st.markdown("#### 🔄 Fixture swings (easing = negative delta)")
