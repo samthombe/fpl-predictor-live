@@ -1,4 +1,4 @@
-# predictor.py -- AUTO MODEL-ARITY + FIXTURE MAPPING + VISIBLE DEBUG
+# predictor.py -- FINAL: chance + minutes guard, arity bridge, fixture mapping
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -127,8 +127,6 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
     p["is_home"] = p["team_code"].map(lambda c: fx.get(c, {}).get("is_home", 0))
     p["opp_code"] = p["team_code"].map(lambda c: fx.get(c, {}).get("opp", 0)).astype(int)
     p["n_fixtures"] = p["team_code"].map(lambda c: fx.get(c, {}).get("n", 0)).astype(int)
-    p["chance_factor"] = 0.40 + 0.60 * (
-        pd.to_numeric(p["chance_pct"], errors="coerce").fillna(100) / 100.0)
 
     gw = 0
     if fixtures:
@@ -137,11 +135,26 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
         except (TypeError, ValueError):
             gw = 0
 
+    # Chance of playing (injury / doubt)
+    chance = (pd.to_numeric(p["chance_pct"], errors="coerce").fillna(100)
+              if "chance_pct" in p.columns else pd.Series(100.0, index=p.index))
+    p["chance_factor"] = 0.40 + 0.60 * (chance / 100.0)
+
+    # Minutes guard: unused players cannot outrank starters
+    if "minutes" in p.columns:
+        mins = pd.to_numeric(p["minutes"], errors="coerce").fillna(0)
+        mpg = mins / max(gw - 1, 1)
+        p["minutes_factor"] = 0.10 + 0.90 * np.clip(mpg / 45.0, 0.0, 1.0)
+    else:
+        p["minutes_factor"] = 1.0
+    p["chance_factor"] = p["chance_factor"] * p["minutes_factor"]
+
     LAST_DEBUG.update({
         "fixtures_received": len(fixtures or []),
         "teams_with_fixture": len(fx),
         "players_matched": int((p["fixture_factor"] != 1.0).sum()),
         "gw_used": gw,
+        "zero_minutes_players": int((pd.to_numeric(p.get("minutes", 0), errors="coerce").fillna(0) == 0).sum()),
         "sample_fixture_keys": sorted(list((fixtures or [{}])[0].keys()))[:12],
     })
 
@@ -185,6 +198,7 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
 
             cf = p["chance_factor"].to_numpy()
             proj, floor, ceil = proj * cf, floor * cf, ceil * cf
+            proj = np.maximum(proj, 0.0)
             floor = np.maximum(proj - (proj - floor) * 1.10, 0.0)
             ceil = proj + (ceil - proj) * 1.10
             floor = np.minimum(floor, proj)
