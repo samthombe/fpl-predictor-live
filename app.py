@@ -12,7 +12,7 @@ st.title("🏆 FPL Predictor MVP")
 st.caption("Live projections + optimal 15-player squad for the next Gameweek.")
 
 
-@st.cache_data(ttl=900, show_spinner="Fetching FPL data...")
+@st.cache_data(ttl=300, show_spinner="Fetching FPL data...")
 def get_data():
     return load_clean_data()
 

@@ -134,35 +134,40 @@ def load_raw_data():
 
 
 def _select_next_fixtures(fixtures_list, events_df):
-    """Identifies the NEXT upcoming Gameweek and returns only its fixtures."""
-    if not fixtures_list or events_df is None or events_df.empty:
+    if not fixtures_list:
         return [], None
-
-    target_gw_id = None
-    
-    ev = events_df.copy()
-    ev["id"] = pd.to_numeric(ev["id"], errors="coerce")
-    ev = ev.dropna(subset=["id"]).sort_values("id")
-    
-    if "finished" in ev.columns:
-        ev["is_finished"] = ev["finished"].astype(str).str.lower().isin(["true", "1", "t", "yes"])
-        pending_events = ev[~ev["is_finished"]]
-        if not pending_events.empty:
-            target_gw_id = int(pending_events.iloc[0]["id"])
-        else:
-            target_gw_id = int(ev["id"].max()) + 1
-    else:
-        max_fixture_gw = max((f.get("event", 0) for f in fixtures_list), default=0)
-        target_gw_id = max_fixture_gw 
-
-    if target_gw_id is None:
-        return [], None
-
-    filtered_fixtures = [f for f in fixtures_list if f.get("event") == target_gw_id]
-    
-    print(f"DEBUG: Selected GW {target_gw_id}. Found {len(filtered_fixtures)} fixtures.")
-
-    return filtered_fixtures, target_gw_id
+    ev = events_df.copy() if events_df is not None else pd.DataFrame()
+    target = None
+    if not ev.empty and "id" in ev.columns:
+        ev["id"] = pd.to_numeric(ev["id"], errors="coerce")
+        ev = ev.dropna(subset=["id"]).sort_values("id")
+        if "is_next" in ev.columns:
+            nxt = ev[ev["is_next"].astype(str).str.lower().isin(["true", "1"])]
+            if not nxt.empty:
+                target = int(nxt.iloc[0]["id"])
+        if target is None and "deadline_time" in ev.columns:
+            dl = pd.to_datetime(ev["deadline_time"], errors="coerce", utc=True)
+            fut = ev[dl > pd.Timestamp.now(tz="UTC")]
+            if not fut.empty:
+                target = int(fut.iloc[0]["id"])
+        if target is None and "finished" in ev.columns:
+            fin = ev["finished"].astype(str).str.lower().isin(["true", "1", "t", "yes"])
+            pend = ev[~fin]
+            if not pend.empty:
+                target = int(pend.iloc[0]["id"])
+        if target is None:
+            target = int(ev["id"].max()) + 1
+    if target is None:
+        target = max((int(f.get("event") or 0) for f in fixtures_list), default=0)
+    filtered = [f for f in fixtures_list if f.get("event") == target]
+    if not filtered:
+        evs = sorted({int(f.get("event") or 0) for f in fixtures_list if f.get("event")})
+        upcoming = [e for e in evs if e >= target]
+        if upcoming:
+            target = upcoming[0]
+            filtered = [f for f in fixtures_list if f.get("event") == target]
+    print(f"DEBUG: selected GW {target}, {len(filtered)} fixtures")
+    return filtered, target
 
 
 def clean_players(players: pd.DataFrame, teams: pd.DataFrame, position_map: dict) -> pd.DataFrame:
