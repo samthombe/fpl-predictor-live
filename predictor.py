@@ -1,4 +1,4 @@
-# predictor.py -- FIXTURE MAPPING FIX + REAL ML INFERENCE + VISIBLE DEBUG
+# predictor.py -- ALIGNED FEATURES + FIXTURE MAPPING + VISIBLE DEBUG
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -34,8 +34,9 @@ if JOBLIB_OK:
 
 LAST_DEBUG["models_loaded"] = MODELS_LOADED
 
+# MUST match train_model.py FEATURE_COLS exactly (19 features).
 FEATURE_COLS = [
-    "position", "team_code", "gw", "is_home", "fdr", "opp_code",
+    "position", "gw", "is_home", "fdr",
     "form_1", "form_3", "form_5", "ppg_lag",
     "xg_lag1", "xa_lag1", "def_actions_sum_lag1",
     "minutes_lag1", "starts_lag1", "goals_lag1", "assists_lag1",
@@ -109,7 +110,9 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
     p["opp_code"] = p["team_code"].map(lambda c: fx.get(c, {}).get("opp", 0)).astype(int)
     p["n_fixtures"] = p["team_code"].map(lambda c: fx.get(c, {}).get("n", 0)).astype(int)
 
-    p["chance_factor"] = 0.40 + 0.60 * (pd.to_numeric(p["chance_pct"], errors="coerce").fillna(100) / 100.0)
+    p["chance_factor"] = 0.40 + 0.60 * (
+        pd.to_numeric(p["chance_pct"], errors="coerce").fillna(100) / 100.0
+    )
 
     gw = 0
     if fixtures:
@@ -123,28 +126,27 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
         "teams_with_fixture": len(fx),
         "players_matched": int((p["fixture_factor"] != 1.0).sum()),
         "gw_used": gw,
+        "features_used": len(FEATURE_COLS),
         "sample_fixture_keys": sorted(list((fixtures or [{}])[0].keys()))[:12],
     })
 
     used_ml = False
     if MODELS_LOADED:
         try:
-            # Build X with EXACT training columns, correct dtypes.
+            # Exact training columns, correct dtypes.
+            # Counting stats are season-to-date totals -- matches the ALIGNED builder.
             X = pd.DataFrame(index=p.index)
             X["position"] = p["position"].map(POS_MAP).fillna(0).astype(int)
-            X["team_code"] = p["team_code"]
             X["gw"] = gw
             X["is_home"] = p["is_home"].astype(int)
             X["fdr"] = p["fdr"].astype(float)
-            X["opp_code"] = p["opp_code"]
             X["form_1"] = pd.to_numeric(p["event_points"], errors="coerce")
             X["form_3"] = pd.to_numeric(p["form"], errors="coerce")
             X["form_5"] = pd.to_numeric(p["points_per_game"], errors="coerce")
             X["ppg_lag"] = X["form_5"]
-            # NOTE: season totals used as lag proxies (known approximation).
             X["xg_lag1"] = pd.to_numeric(p["expected_goals"], errors="coerce")
             X["xa_lag1"] = pd.to_numeric(p["expected_assists"], errors="coerce")
-            X["def_actions_sum_lag1"] = np.nan
+            X["def_actions_sum_lag1"] = np.nan  # not available live; LGB handles NaN
             X["minutes_lag1"] = pd.to_numeric(p["minutes"], errors="coerce")
             X["starts_lag1"] = pd.to_numeric(p["starts"], errors="coerce")
             X["goals_lag1"] = pd.to_numeric(p["goals_scored"], errors="coerce")
@@ -156,17 +158,25 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
             X = X[FEATURE_COLS]
 
             proj = np.asarray(MODEL_MEAN.predict(X), dtype=float)
-            floor = np.asarray(MODEL_Q10.predict(X), dtype=float) if MODEL_Q10 is not None else proj * 0.7
-            ceil = np.asarray(MODEL_Q90.predict(X), dtype=float) if MODEL_Q90 is not None else proj * 1.3
+            floor = (np.asarray(MODEL_Q10.predict(X), dtype=float)
+                     if MODEL_Q10 is not None else proj * 0.7)
+            ceil = (np.asarray(MODEL_Q90.predict(X), dtype=float)
+                    if MODEL_Q90 is not None else proj * 1.3)
 
             cf = p["chance_factor"].to_numpy()
             proj, floor, ceil = proj * cf, floor * cf, ceil * cf
 
-            # Widen intervals: measured coverage was 69% vs 80% target.
+            # Widen intervals (measured coverage 69% vs 80% target).
             floor = np.maximum(proj - (proj - floor) * 1.10, 0.0)
             ceil = proj + (ceil - proj) * 1.10
 
-            p["projected_points"], p["predicted_floor"], p["predicted_ceiling"] = proj, floor, ceil
+            # Enforce ordering: floor <= mean <= ceiling (fixes quantile crossing).
+            floor = np.minimum(floor, proj)
+            ceil = np.maximum(ceil, proj)
+
+            p["projected_points"] = proj
+            p["predicted_floor"] = floor
+            p["predicted_ceiling"] = ceil
             used_ml = True
             LAST_DEBUG["engine"] = "ml"
             LAST_DEBUG.pop("ml_error", None)
@@ -186,6 +196,10 @@ def project_players(players: pd.DataFrame, teams: pd.DataFrame, fixtures) -> pd.
     p["projected_points"] = p["projected_points"] * boost
     p["predicted_floor"] = p["predicted_floor"] * boost
     p["predicted_ceiling"] = np.minimum(p["predicted_ceiling"] * boost, 20.0 * np.maximum(n, 1))
+
+    # Final safety: keep floor <= projected <= ceiling after all adjustments.
+    p["predicted_floor"] = np.minimum(p["predicted_floor"], p["projected_points"])
+    p["predicted_ceiling"] = np.maximum(p["predicted_ceiling"], p["projected_points"])
 
     p["value"] = (p["projected_points"] / p["price_m"].replace(0, np.nan)).fillna(0.0)
     return p.sort_values("projected_points", ascending=False).reset_index(drop=True)

@@ -33,22 +33,14 @@ TARGET_COL = "y"
 
 # Define features we WANT to use. If they are missing/NaN in data, LGB handles it.
 FEATURE_COLS = [
-    # Core context
-    "position", "team_code", "gw", "is_home", "fdr", "opp_code",
-    
-    # Form & Momentum (lagged, leak-free)
+    "position", "gw", "is_home", "fdr",
     "form_1", "form_3", "form_5", "ppg_lag",
-    
-    # Underlying Performance (lagged levels as of prior GW)
     "xg_lag1", "xa_lag1", "def_actions_sum_lag1",
-    "minutes_lag1", "starts_lag1", "goals_lag1", "assists_lag1", 
+    "minutes_lag1", "starts_lag1", "goals_lag1", "assists_lag1",
     "bonus_lag1", "clean_sheets_lag1",
-    
-    # Market/Price Signals
     "price_lag1", "sel_lag1",
 ]
-
-CATEGORICAL_FEATURES = ["position", "team_code", "opp_code"]
+CATEGORICAL_FEATURES = ["position"]
 
 
 def prepare_data(df):
