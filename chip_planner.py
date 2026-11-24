@@ -1,4 +1,4 @@
-# chip_planner.py -- MULTI-GW OUTLOOK + CHIP TIMING (type-hardened)
+# chip_planner.py -- FIXED matrix orientation + chip timing
 import requests
 import numpy as np
 import pandas as pd
@@ -34,7 +34,10 @@ def _maps(teams):
 
 def _int_cols(df):
     d = df.copy()
-    d.columns = [int(c) for c in d.columns]
+    try:
+        d.columns = [int(c) for c in d.columns]
+    except (TypeError, ValueError):
+        pass
     return d
 
 
@@ -44,10 +47,10 @@ def build_matrix(fixtures, teams, start_gw, horizon=6):
     id2code, code2short = _maps(teams)
     team_names = sorted(code2short.values())
     cells = {t: {g: [] for g in gws} for t in team_names}
+
     for f in fixtures or []:
-        ev = f.get("event")
         try:
-            ev = int(ev)
+            ev = int(f.get("event"))
         except (TypeError, ValueError):
             continue
         if ev not in gws:
@@ -64,6 +67,7 @@ def build_matrix(fixtures, teams, start_gw, horizon=6):
             cells[hs][ev].append((as_ or "?", hd, "H"))
         if as_:
             cells[as_][ev].append((hs or "?", ad, "A"))
+
     disp, fdr, cnt = {}, {}, {}
     for t in team_names:
         disp[t], fdr[t], cnt[t] = {}, {}, {}
@@ -78,10 +82,15 @@ def build_matrix(fixtures, teams, start_gw, horizon=6):
             else:
                 disp[t][g] = f"{len(e)}× " + "/".join(f"{o}({ha})" for o, _, ha in e)
                 fdr[t][g] = float(np.mean([d for _, d, _ in e]))
-    idx = pd.Index(team_names, name="team")
-    return (pd.DataFrame(disp, index=idx).T.rename_axis("team"),
-            pd.DataFrame(fdr, index=idx).T.rename_axis("team"),
-            pd.DataFrame(cnt, index=idx).T.rename_axis("team"))
+
+    # dict-of-dicts -> columns=teams, index=gws; transpose -> rows=teams, cols=gws
+    disp_df = pd.DataFrame(disp).T.sort_index(axis=1)
+    fdr_df = pd.DataFrame(fdr).T.sort_index(axis=1)
+    cnt_df = pd.DataFrame(cnt).T.sort_index(axis=1)
+    for d in (disp_df, fdr_df, cnt_df):
+        d.index.name = "team"
+        d.columns = [int(c) for c in d.columns]
+    return disp_df, fdr_df, cnt_df
 
 
 def windows(count_df):
@@ -117,6 +126,7 @@ def recommendations(fdr_df, count_df, projections, start_gw, horizon):
     doubles = {g: [t for t in count_df.index if count_df.loc[t, g] >= 2] for g in gws}
     playing = {g: int((count_df[g] > 0).sum()) for g in gws}
     rec = {}
+
     if gws:
         bb = max(gws, key=lambda g: 3 * len(doubles[g]) + playing[g])
         rec["Bench Boost"] = {"gw": bb, "headline": f"GW{bb}",
@@ -133,7 +143,7 @@ def recommendations(fdr_df, count_df, projections, start_gw, horizon):
 
     tc_best = None
     if projections is not None and not projections.empty and "predicted_ceiling" in projections.columns:
-        for _, r in projections.nlargest(6, "predicted_ceiling").iterrows():
+        for _, r in projections.nlargest(8, "predicted_ceiling").iterrows():
             team = r.get("team")
             if team not in fdr_df.index:
                 continue
