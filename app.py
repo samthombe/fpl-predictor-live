@@ -1,20 +1,88 @@
-# app.py -- WITH GAMEREWEEK HEADER & OPTIMIZED INPUT SORTING
+# app.py -- FPL PREDICTOR: PROJECTIONS + SQUAD + CAPTAINCY + NEWS + CHIP PLANNER
+import html
 import streamlit as st
 import pandas as pd
+import numpy as np
 
 from data_loader import load_clean_data
 from predictor import project_players, LAST_DEBUG
-from optimizer import optimize_squad
+from optimizer import optimize_squad, pick_starting_xi
+from news_parser import availability_report
+from chip_planner import get_all_fixtures, build_matrix, windows, swing, recommendations
 
+st.set_page_config(page_title="FPL Edge", page_icon="🏆", layout="wide")
 
-st.set_page_config(page_title="FPL Predictor MVP", page_icon="🏆", layout="wide")
-st.title("🏆 FPL Predictor MVP")
-st.caption("Live projections + optimal 15-player squad for the next Gameweek.")
+CSS = """
+<style>
+:root{
+  --pitch:#00E5A0; --volt:#7CFF4F; --amber:#FFB020; --danger:#FF4D6D;
+  --info:#38BDF8; --magenta:#F472B6; --ink:#0B1220; --surface:#121A2B; --line:#22304A;
+}
+[data-testid="stAppViewContainer"]{
+  background:
+    radial-gradient(1200px 500px at 85% -10%, rgba(0,229,160,.14), transparent 60%),
+    radial-gradient(900px 420px at -10% 20%, rgba(56,189,248,.12), transparent 60%),
+    linear-gradient(180deg,#0B1220 0%,#0D1526 55%,#0B1220 100%);
+}
+[data-testid="stHeader"]{background:transparent;}
+.hero{
+  padding:22px 26px;border:1px solid var(--line);border-radius:18px;margin-bottom:14px;
+  background:linear-gradient(120deg,rgba(0,229,160,.16),rgba(56,189,248,.10) 45%,rgba(244,114,182,.12));
+  box-shadow:0 10px 40px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06);
+}
+.hero h1{margin:0;font-size:2rem;letter-spacing:.5px;
+  background:linear-gradient(90deg,#7CFF4F,#00E5A0 40%,#38BDF8);
+  -webkit-background-clip:text;background-clip:text;color:transparent;}
+.hero p{margin:6px 0 0;color:#B9C6DA;}
+.gw-badge{display:inline-block;margin-top:10px;padding:6px 14px;border-radius:999px;
+  border:1px solid rgba(0,229,160,.5);color:#7CFF4F;font-weight:700;letter-spacing:1px;
+  background:rgba(0,229,160,.08);}
+[data-testid="stTabs"] [role="tab"]{
+  border-radius:12px 12px 0 0;border:1px solid var(--line);border-bottom:none;
+  background:#0F1728;color:#9FB0C8;font-weight:600;padding:10px 16px;}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"]{
+  background:linear-gradient(180deg,rgba(0,229,160,.18),rgba(18,26,43,.9));
+  color:#7CFF4F;border-color:rgba(0,229,160,.45);}
+[data-testid="stMetric"]{
+  background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:12px 16px;}
+[data-testid="stMetricValue"]{color:#E8EEF7;}
+[data-testid="stMetricLabel"]{color:#8FA2BC;}
+.pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:.72rem;
+  font-weight:800;letter-spacing:.6px;margin-right:8px;}
+.pill-out{background:rgba(255,77,109,.16);color:#FF8FA3;border:1px solid rgba(255,77,109,.5);}
+.pill-doubt{background:rgba(255,176,32,.16);color:#FFD08A;border:1px solid rgba(255,176,32,.5);}
+.pill-monitor{background:rgba(56,189,248,.16);color:#9BDcF8;border:1px solid rgba(56,189,248,.5);}
+.news-card{border:1px solid var(--line);border-left:4px solid var(--danger);
+  background:var(--surface);border-radius:12px;padding:12px 14px;margin-bottom:10px;}
+.news-card.doubt{border-left-color:var(--amber);}
+.news-card .who{font-weight:800;color:#E8EEF7;}
+.news-card .meta{color:#8FA2BC;font-size:.8rem;margin-left:6px;}
+.news-card .txt{display:block;margin-top:6px;color:#C6D3E6;font-size:.88rem;line-height:1.45;}
+.chip-card{border:1px solid var(--line);border-radius:14px;padding:14px 16px;height:100%;
+  background:linear-gradient(160deg,rgba(18,26,43,.95),rgba(15,23,40,.9));}
+.chip-card h4{margin:0 0 6px;color:#9FB0C8;font-size:.8rem;letter-spacing:1.2px;text-transform:uppercase;}
+.chip-card .val{font-size:1.35rem;font-weight:800;color:#7CFF4F;}
+.chip-card .why{color:#B9C6DA;font-size:.85rem;margin-top:6px;line-height:1.45;}
+.chip-card .tg{color:#8FA2BC;font-size:.78rem;margin-top:8px;}
+*::-webkit-scrollbar{width:10px;height:10px;}
+*::-webkit-scrollbar-track{background:#0D1526;border-radius:8px;}
+*::-webkit-scrollbar-thumb{background:linear-gradient(180deg,#00E5A0,#38BDF8);border-radius:8px;
+  border:2px solid #0D1526;}
+*::-webkit-scrollbar-thumb:hover{background:linear-gradient(180deg,#7CFF4F,#7DD3FC);}
+[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:12px;}
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
 
 
 @st.cache_data(ttl=300, show_spinner="Fetching FPL data...")
 def get_data():
     return load_clean_data()
+
+
+@st.cache_data(ttl=900, show_spinner="Loading fixture calendar...")
+def get_fixtures_cached():
+    return get_all_fixtures()
 
 
 try:
@@ -23,178 +91,207 @@ except Exception as e:
     st.error(f"Could not fetch FPL data: {e}")
     st.stop()
 
-# ---------- DISPLAY CURRENT GAMEWEEK PROMINENTLY ----------
-next_gw = debug.get("next_gw")
-if next_gw:
-    st.metric(label="📅 Analyzing Gameweek", value=f"GW {next_gw}", delta=None)
-else:
-    st.warning("⚠️ Could not determine current Gameweek from API.")
-
-# ---------- DEBUG PANEL ----------
-with st.expander("🔎 Debug: what the FPL API returned"):
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Raw elements", debug.get("raw_player_count", 0))
-    c2.metric("Next GW", debug.get("next_gw"))
-    c3.metric("Fixtures used", debug.get("fixtures_used", 0))
-    c4.metric("Has now_cost", debug.get("has_now_cost"))
-    
-    st.markdown("**Top-level keys:**")
-    st.code(str(debug.get("top_level_keys")))
-    
-    st.markdown("**Status value counts (raw):**")
-    st.json(debug.get("status_value_counts"))
-    
-    if debug.get("sample_element"):
-        st.markdown("**Sample player record:**")
-        st.json(debug.get("sample_element"))
-
-# ---------- PROCESS DATA ----------
 df = project_players(players, teams, fixtures)
+next_gw = debug.get("next_gw")
+
+st.markdown(
+    f"<div class='hero'><h1>🏆 FPL EDGE</h1>"
+    f"<p>Live ML projections · squad optimiser · captaincy matrix · injury awareness · chip timing.</p>"
+    f"<span class='gw-badge'>GAMEWEEK {next_gw if next_gw else '—'}</span></div>",
+    unsafe_allow_html=True,
+)
 
 with st.expander("🧪 Engine & fixture debug"):
     st.json(LAST_DEBUG)
-    
-if "_relaxed" in df.columns and len(df) > 0 and bool(df["_relaxed"].any()):
-    st.warning("Strict availability filter removed everyone; showing all priced players instead.")
+with st.expander("🔎 API debug"):
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Raw elements", debug.get("raw_player_count", 0))
+    c2.metric("Next GW", next_gw)
+    c3.metric("Fixtures used", debug.get("fixtures_used", 0))
+    c4.metric("Has now_cost", debug.get("has_now_cost"))
+    st.json(debug.get("status_value_counts"))
 
 if df.empty:
-    st.error("Still no players after cleaning. Open the Debug panel and paste the sample record.")
+    st.error("No players after cleaning. Open the API debug panel.")
     st.stop()
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Available players", len(df))
-col2.metric("Fixtures loaded", len(fixtures) if fixtures else 0)
-col3.metric("Top projected", f"{df.iloc[0]['web_name']} ({df.iloc[0]['projected_points']:.2f})")
+tabs = st.tabs(["🔥 Projections", "🧠 Squad Builder", "🎯 Captaincy",
+                "🚑 Availability & News", "🃏 Chip Planner"])
 
-# ---------- TOP PLAYERS TABLE ----------
-st.subheader("🔥 Top 50 projected players")
-show_cols = [
-    "web_name", "position", "team", "price_m", 
-    "projected_points", "predicted_floor", "predicted_ceiling",
-    "value", "form", "points_per_game", "fixture_factor", "chance_pct", "status",
-    "selected_by_percent"  # Added ownership column
-]
-available_show_cols = [c for c in show_cols if c in df.columns]
-st.dataframe(df[available_show_cols].head(50).round(2), use_container_width=True)
+# ---------------- PROJECTIONS ----------------
+with tabs[0]:
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Available players", len(df))
+    c2.metric("Fixtures loaded", len(fixtures) if fixtures else 0)
+    c3.metric("Top projected", f"{df.iloc[0]['web_name']} ({df.iloc[0]['projected_points']:.2f})")
+    st.subheader("Top 50 projected players")
+    show_cols = ["web_name", "position", "team", "price_m", "projected_points",
+                 "predicted_floor", "predicted_ceiling", "value", "form",
+                 "points_per_game", "fixture_factor", "chance_pct", "status",
+                 "selected_by_percent"]
+    cols = [c for c in show_cols if c in df.columns]
+    st.dataframe(df[cols].head(50).round(2), use_container_width=True, hide_index=True)
+    st.download_button("Download projections CSV", df.to_csv(index=False).encode(),
+                       "fpl_projections.csv", "text/csv")
 
-# ---------- SQUAD OPTIMIZER ----------
-st.subheader("🧠 Generate optimal squad")
-budget = st.slider("Budget (£m)", 80.0, 100.0, 100.0, 0.5)
-max_team = st.selectbox("Max players per team", [2, 3], index=1)
+# ---------------- SQUAD BUILDER ----------------
+with tabs[1]:
+    st.subheader("Generate optimal squad")
+    budget = st.slider("Budget (£m)", 80.0, 100.0, 100.0, 0.5)
+    max_team = st.selectbox("Max players per team", [2, 3], index=1)
+    if st.button("Optimize 15-player team", type="primary"):
+        import traceback
+        try:
+            d = df.sort_values("projected_points", ascending=False).reset_index(drop=True)
+            with st.spinner("Building legal 15-man squad..."):
+                squad = optimize_squad(d, budget=budget, max_per_team=max_team)
+            xi = pick_starting_xi(squad)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Squad pts", f"{squad['projected_points'].sum():.2f}")
+            c2.metric("Cost", f"£{squad['price_m'].sum():.1f}m")
+            c3.metric("Bank", f"£{budget - squad['price_m'].sum():.1f}m")
+            st.markdown(f"### ⚽ Starting XI — {xi['projected_points'].sum():.2f} pts")
+            cols = [c for c in ["web_name", "position", "team", "price_m", "projected_points",
+                                "predicted_floor", "predicted_ceiling", "selected_by_percent"]
+                    if c in xi.columns]
+            st.dataframe(xi[cols].round(2), use_container_width=True, hide_index=True)
+            st.markdown("### 🪑 Full 15-man squad")
+            st.dataframe(squad[cols].round(2), use_container_width=True, hide_index=True)
+            st.download_button("Download squad CSV", squad.to_csv(index=False).encode(),
+                               f"fpl_squad_gw{next_gw}.csv", "text/csv")
+        except Exception as e:
+            msg = str(e).strip() or f"{type(e).__name__} (no message)"
+            st.error(f"Optimizer failed: {msg}")
+            with st.expander("🔬 Traceback"):
+                st.code(traceback.format_exc())
 
-if st.button("Optimize 15-player team"):
-    import traceback
-    from optimizer import optimize_squad, pick_starting_xi
-
-    try:
-        df_sorted = df.sort_values("projected_points", ascending=False).reset_index(drop=True)
-
-        with st.spinner("Building legal 15-man squad..."):
-            squad = optimize_squad(df_sorted, budget=budget, max_per_team=max_team)
-
-        total_pts = squad["projected_points"].sum()
-        total_cost = squad["price_m"].sum()
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Squad projected pts", f"{total_pts:.2f}")
-        c2.metric("Squad cost", f"£{total_cost:.1f}m")
-        c3.metric("Bank", f"£{budget - total_cost:.1f}m")
-
-        if "predicted_floor" in squad.columns and "predicted_ceiling" in squad.columns:
-            c4, c5 = st.columns(2)
-            c4.metric("Floor (Safe)", f"{squad['predicted_floor'].sum():.2f}")
-            c5.metric("Ceiling (Upside)", f"{squad['predicted_ceiling'].sum():.2f}")
-
-        # ---- Starting XI (what actually scores) ----
-        xi = pick_starting_xi(squad)
-        bench = squad[~squad.index.isin(xi.index)] if len(squad) == 15 else squad.iloc[11:]
-
-        st.markdown("### ⚽ Starting XI")
-        st.caption(f"XI projected points: **{xi['projected_points'].sum():.2f}**")
-        cols = [c for c in ["web_name","position","team","price_m","projected_points",
-                            "predicted_floor","predicted_ceiling","selected_by_percent"] if c in xi.columns]
-        st.dataframe(xi[cols].round(2), hide_index=True, use_container_width=True)
-
-        st.markdown("### 🪑 Full 15-man squad")
-        st.dataframe(squad[cols].round(2), hide_index=True, use_container_width=True)
-
-        st.download_button(
-            "Download squad CSV",
-            data=squad.to_csv(index=False).encode(),
-            file_name=f"fpl_squad_gw{debug.get('next_gw','x')}.csv",
-            mime="text/csv",
-        )
-
-    except Exception as e:
-        msg = str(e).strip()
-        if not msg:
-            msg = f"{type(e).__name__} raised with no message (see details below)."
-        st.error(f"Optimizer failed: {msg}")
-        with st.expander("🔬 Full traceback (for debugging)"):
-            st.code(traceback.format_exc())
-        st.info(
-            f"Diagnostics: rows={len(df)}, "
-            f"GK={int((df['position']=='GK').sum())}, "
-            f"DEF={int((df['position']=='DEF').sum())}, "
-            f"MID={int((df['position']=='MID').sum())}, "
-            f"FWD={int((df['position']=='FWD').sum())}, "
-            f"cheapest_total_possible=£{df.groupby('position')['price_m'].min().sum():.1f}m"
-        )
-
-# ---------- CAPTAINCY MATRIX (UPGRADED WITH OWNERSHIP) ----------
-st.subheader("🎯 Captaincy Recommendations")
-
-cap_df = df.copy()
-
-# Ensure we have the necessary columns
-if "predicted_floor" in cap_df.columns and "predicted_ceiling" in cap_df.columns:
-    cap_df["gap"] = cap_df["predicted_ceiling"] - cap_df["predicted_floor"]
-    
-    # Check if ownership data exists
-    has_ownership = "selected_by_percent" in cap_df.columns
-    
-    col_a, col_b, col_c, col_d = st.columns(4)
-    
-    with col_a:
-        st.markdown("**🛡️ Safest Picks (Max Floor)**")
-        safest = cap_df.nlargest(3, "predicted_floor")[["web_name", "position", "team", "predicted_floor"]]
-        st.dataframe(safest.round(2), hide_index=True, use_container_width=True)
-        
-    with col_b:
-        st.markdown("**🚀 High Upside (Max Ceiling)**")
-        upside = cap_df.nlargest(3, "predicted_ceiling")[["web_name", "position", "team", "predicted_ceiling"]]
-        st.dataframe(upside.round(2), hide_index=True, use_container_width=True)
-        
-    with col_c:
-        st.markdown("**💎 True Differentials (Low Own, High Ceil)**")
-        if has_ownership:
-            # Logic: Ownership < 10% AND Ceiling > 7.0 points
-            diff_candidates = cap_df[
-                (cap_df["selected_by_percent"] < 10.0) & 
-                (cap_df["predicted_ceiling"] > 7.0)
-            ].nlargest(3, "predicted_ceiling")
-            
-            if not diff_candidates.empty:
-                diffs = diff_candidates[["web_name", "position", "team", "predicted_ceiling", "selected_by_percent"]]
-                diffs.columns = ["Player", "Pos", "Team", "Ceiling", "Ownership %"]
-                st.dataframe(diffs.round(2), hide_index=True, use_container_width=True)
+# ---------------- CAPTAINCY ----------------
+with tabs[2]:
+    st.subheader("Captaincy recommendations")
+    cap = df.copy()
+    if {"predicted_floor", "predicted_ceiling"} <= set(cap.columns):
+        a, b, c, d = st.columns(4)
+        with a:
+            st.markdown("**🛡️ Safest (max floor)**")
+            t = cap.nlargest(3, "predicted_floor")[["web_name", "position", "team", "predicted_floor"]]
+            st.dataframe(t.round(2), hide_index=True, use_container_width=True)
+        with b:
+            st.markdown("**🚀 Upside (max ceiling)**")
+            t = cap.nlargest(3, "predicted_ceiling")[["web_name", "position", "team", "predicted_ceiling"]]
+            st.dataframe(t.round(2), hide_index=True, use_container_width=True)
+        with c:
+            st.markdown("**💎 Differentials (<10% own)**")
+            if "selected_by_percent" in cap.columns:
+                t = cap[(cap["selected_by_percent"] < 10) & (cap["predicted_ceiling"] > 7)] \
+                    .nlargest(3, "predicted_ceiling")
+                if not t.empty:
+                    t = t[["web_name", "position", "team", "predicted_ceiling", "selected_by_percent"]]
+                    t.columns = ["Player", "Pos", "Team", "Ceiling", "Own%"]
+                    st.dataframe(t.round(2), hide_index=True, use_container_width=True)
+                else:
+                    st.write("No strong differentials this week.")
             else:
-                st.write("No strong differentials found (<10% own, >7 pt ceil).")
-        else:
-            st.warning("Ownership data missing. Cannot compute true differentials.")
-            
-    with col_d:
-        st.markdown("**⚖️ Best Value Captains**")
-        value_caps = cap_df.head(50).copy()
-        if "price_m" in value_caps.columns and value_caps["price_m"].min() > 0:
-            value_caps["ceil_per_m"] = value_caps["predicted_ceiling"] / value_caps["price_m"]
-            best_value = value_caps.nlargest(3, "ceil_per_m")[["web_name", "position", "team", "predicted_ceiling", "price_m", "ceil_per_m"]]
-            best_value.columns = ["Player", "Pos", "Team", "Ceiling", "Price", "Pts/£m"]
-            st.dataframe(best_value.round(2), hide_index=True, use_container_width=True)
-        else:
-            st.write("Price data missing.")
+                st.warning("Ownership data missing.")
+        with d:
+            st.markdown("**⚖️ Value (ceiling / £m)**")
+            v = cap.head(50).copy()
+            if "price_m" in v.columns and v["price_m"].min() > 0:
+                v["cpm"] = v["predicted_ceiling"] / v["price_m"]
+                t = v.nlargest(3, "cpm")[["web_name", "team", "predicted_ceiling", "price_m", "cpm"]]
+                t.columns = ["Player", "Team", "Ceiling", "Price", "Pts/£m"]
+                st.dataframe(t.round(2), hide_index=True, use_container_width=True)
+    else:
+        st.warning("Captaincy matrix needs floor/ceiling from the ML models.")
 
-else:
-    st.warning("Captaincy matrix requires ML models (Floor/Ceiling) to be loaded.")
+# ---------------- AVAILABILITY & NEWS ----------------
+with tabs[3]:
+    st.subheader("Availability & injury news")
+    flagged, summ = availability_report(df)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🚫 Out", summ["out"])
+    c2.metric("⚠️ Doubt", summ["doubt"])
+    c3.metric("👁 Monitor", summ["monitor"])
+    c4.metric("🆕 Fresh (24h)", summ["fresh24"])
+    st.caption("Projections are already chance-adjusted; this panel shows WHY and how recent the news is.")
 
-st.info("MVP uses heuristic projections. Next milestone: ML model on historical data.")
+    f1, f2 = st.columns([1, 2])
+    tier = f1.selectbox("Risk tier", ["All", "Out", "Doubt", "Monitor"])
+    q = f2.text_input("Search player / club / news", "")
+    view = flagged.copy()
+    if tier != "All":
+        view = view[view["risk_tier"] == tier]
+    if q:
+        ql = q.lower()
+        mask = (view["web_name"].str.lower().str.contains(ql)
+                | view["team"].astype(str).str.lower().str.contains(ql)
+                | view["news"].str.lower().str.contains(ql))
+        view = view[mask]
+
+    cards = view[view["risk_tier"].isin(["Out", "Doubt"])].head(6)
+    for _, r in cards.iterrows():
+        cls = "news-card" + (" doubt" if r["risk_tier"] == "Doubt" else "")
+        pill = "pill-doubt" if r["risk_tier"] == "Doubt" else "pill-out"
+        age = r["news_age_h"]
+        age_txt = f"{age:.0f}h ago" if age is not None else "date n/a"
+        st.markdown(
+            f"<div class='{cls}'><span class='pill {pill}'>{r['risk_tier'].upper()}</span>"
+            f"<span class='who'>{html.escape(str(r['web_name']))}</span>"
+            f"<span class='meta'>{html.escape(str(r['team']))} · {r['position']} · "
+            f"{r['chance_pct']:.0f}% · {age_txt}</span>"
+            f"<span class='txt'>{html.escape(str(r['news']) or 'No detail provided.')}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    if view.empty:
+        st.success("No flagged players match this filter — squad availability is clean.")
+    else:
+        cols = [c for c in ["web_name", "team", "position", "status_label", "risk_tier",
+                            "chance_pct", "news_age_h", "projected_points", "news"]
+                if c in view.columns]
+        st.dataframe(view[cols].round(1), use_container_width=True, hide_index=True)
+
+# ---------------- CHIP PLANNER ----------------
+with tabs[4]:
+    st.subheader("Chip timing & fixture outlook")
+    horizon = st.slider("Look-ahead (gameweeks)", 3, 8, 6)
+    start = int(next_gw or 1)
+    try:
+        all_fx = get_fixtures_cached()
+    except Exception as e:
+        st.error(f"Could not load fixture calendar: {e}")
+        all_fx = []
+
+    if all_fx:
+        disp, fdr, cnt = build_matrix(all_fx, teams, start, horizon)
+        rec, blanks, doubles, playing = recommendations(fdr, cnt, df, start, horizon)
+
+        st.markdown("#### 🃏 Recommended chip windows")
+        cols = st.columns(4)
+        for col, chip in zip(cols, ["Bench Boost", "Triple Captain", "Free Hit", "Wildcard"]):
+            r = rec[chip]
+            targets = ", ".join(r["targets"]) or "—"
+            col.markdown(
+                f"<div class='chip-card'><h4>{chip}</h4>"
+                f"<div class='val'>{html.escape(str(r['headline']))}</div>"
+                f"<div class='why'>{html.escape(str(r['rationale']))}</div>"
+                f"<div class='tg'>Focus: {html.escape(targets)}</div></div>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("#### 📅 Blank / Double gameweeks")
+        st.dataframe(windows(cnt), use_container_width=True, hide_index=True)
+
+        st.markdown("#### 🗓 Fixture difficulty matrix (next %d GWs)" % horizon)
+        st.dataframe(disp, use_container_width=True)
+        styled = (fdr.style
+                  .background_gradient(cmap="RdYlGn_r", axis=None, vmin=1, vmax=5)
+                  .format(lambda v: "—" if pd.isna(v) else f"{v:.1f}"))
+        st.dataframe(styled, use_container_width=True)
+
+        st.markdown("#### 🔄 Fixture swings (easing = negative delta)")
+        sw = swing(fdr, start, horizon).sort_values("delta")
+        st.dataframe(sw.head(12).round(2), use_container_width=True, hide_index=True)
+    else:
+        st.info("Fixture calendar unavailable; chip windows cannot be computed right now.")
+
+st.caption("Data: official FPL API · Models retrain automatically every Sunday 02:00 UTC.")
