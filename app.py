@@ -116,8 +116,7 @@ if df.empty:
     st.stop()
 
 tabs = st.tabs(["🔥 Projections", "🧠 Squad Builder", "🎯 Captaincy",
-                "🚑 Availability & News", "🃏 Chip Planner"])
-
+                "🚑 Availability & News", "🃏 Chip Planner", "⚖️ Transfer Lab"])
 # ---------------- PROJECTIONS ----------------
 with tabs[0]:
     c1, c2, c3 = st.columns(3)
@@ -302,3 +301,67 @@ with tabs[4]:
         st.info("Fixture calendar unavailable; chip windows cannot be computed right now.")
 
 st.caption("Data: official FPL API · Models retrain automatically every Sunday 02:00 UTC.")
+
+# ---------------- TRANSFER LAB ----------------
+from transfer_simulator import analyze_transfer, CAPTAIN_NONE, CAPTAIN_IN, CAPTAIN_SWAP
+
+with tabs[5]:
+    st.subheader("Transfer Lab — hit analysis")
+    st.caption("Sell one player, buy another, and see exactly when the points hit pays for itself.")
+
+    names = sorted(df["web_name"].unique().tolist())
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        out_name = st.selectbox("Player OUT (sell)", names, index=0)
+    with c2:
+        in_name = st.selectbox("Player IN (buy)", names, index=1 if len(names) > 1 else 0)
+    with c3:
+        hit = st.selectbox("Points hit", [0, 4, 8], index=1,
+                           format_func=lambda h: "Free (0)" if h == 0 else f"-{h}")
+
+    c4, c5 = st.columns(2)
+    with c4:
+        horizon = st.slider("Horizon (gameweeks)", 2, 8, 4)
+    with c5:
+        cap_label = st.selectbox("Captain scenario",
+                                 ["No captain", "IN is captain", "Captain swap (both x2)"])
+    cap_code = {"No captain": CAPTAIN_NONE,
+                "IN is captain": CAPTAIN_IN,
+                "Captain swap (both x2)": CAPTAIN_SWAP}[cap_label]
+
+    if st.button("Analyze transfer", type="primary"):
+        if out_name == in_name:
+            st.error("Pick two different players.")
+        else:
+            start = int(next_gw or 1)
+            try:
+                all_fx = get_fixtures_cached()
+                _, fdr, cnt = build_matrix(all_fx, teams, start, horizon)
+                res = analyze_transfer(df, fdr, cnt, out_name, in_name,
+                                       int(hit), cap_code, start, horizon)
+            except Exception as e:
+                st.error(f"Analysis failed: {type(e).__name__}: {e}")
+                res = None
+
+            if res is None:
+                st.warning("Could not locate one of the players in the fixture matrix.")
+            else:
+                m1, m2, m3 = st.columns(3)
+                m1.metric(f"GW{start} swing", f"{res['tbl']['gain'].iloc[0]:+.2f}")
+                m2.metric("Break-even", f"GW{res['breakeven']}" if res["breakeven"] else "Not in horizon")
+                m3.metric(f"Net by GW{int(res['tbl']['GW'].iloc[-1])}", f"{res['net_end']:+.2f}")
+
+                banner = {"good": st.success, "marginal": st.warning,
+                          "bad": st.error, "free": st.info}[res["kind"]]
+                banner(res["verdict"])
+
+                chart = res["tbl"].set_index("GW")[["cum", "net"]].rename(
+                    columns={"cum": "Cumulative gain", "net": "Net after hit"})
+                st.line_chart(chart)
+                st.dataframe(res["tbl"].round(2), use_container_width=True, hide_index=True)
+
+                st.caption(
+                    f"GW{start} uses the live model projection. GW{start + 1}+ are extrapolated by "
+                    "scaling each player's neutral rate by their club's fixture difficulty and "
+                    "double/blank gameweeks. Form changes and injuries after this week are not modelled."
+                )
